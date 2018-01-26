@@ -13,7 +13,7 @@ CHANGES in version 0.2-rc1
 - Added support for specific learning rates per layer ("learningRate" value in the net json file).
 
 CHANGES in version 0.3-beta1
-- Layers added: GruLayer(UNFINISHED), M2MLstmLayers(UNFINISHED), trimed LstmLayers.
+- Layers added: GruLayer(UNFINISHED), several trimed LstmLayers(no doc for them yet).
 - Activations added: Softplus, ReLU.
 - Optimizers added: AdaGram, AdaDelta, Adam.
-- .sln files become unusable. it will return later in rc version.
+- .sln files, tools and examples become unusable. They will return later in rc version.

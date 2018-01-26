@@ -257,7 +257,7 @@ namespace {
                 real_t prevCellState = cellStates[outputIdx + prevOutputDistance];
                 real_t fgGrad = gate_act_fn_t::deriv(fgAct);
 
-                fgDelta = fgGrad * prevCellState * cellStateErr - fgGrad * niAct * cellStateErr;
+                fgDelta = fgGrad * (prevCellState - niAct) * cellStateErr;
             }
 
             // store the niag deltas and the cell state error

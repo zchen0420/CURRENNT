@@ -624,7 +624,7 @@ int main(int argc, const char *argv[])
             }
             return 0;
         }
-        int device = config.devicesID();
+        int device = config.deviceID();
         cudaDeviceProp prop;
         if ((err = cudaGetDeviceProperties(&prop, device)) != cudaSuccess) {
             std::cerr << "FAILED: " << cudaGetErrorString(err) << std::endl;

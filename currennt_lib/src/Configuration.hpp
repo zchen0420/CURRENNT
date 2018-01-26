@@ -76,7 +76,7 @@ private:
 
     unsigned m_truncSeqLength;
     unsigned m_parallelSequences;
-    unsigned m_devicesID;
+    unsigned m_deviceID;
     unsigned m_maxEpochs;
     unsigned m_maxEpochsNoBest;
     unsigned m_validateEvery;
@@ -221,11 +221,11 @@ public:
     optimizer_type_t optimizer() const;
 
     /**
-     * Returns the ID of GPU devices
+     * Returns the ID of GPU device
      *
-     * @return the ID of GPU devices
+     * @return the ID of GPU device
      */
-    int devicesID() const;
+    int deviceID() const;
 
     /**
      * Returns the maximum number of parallel computed sequences

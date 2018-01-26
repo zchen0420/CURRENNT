@@ -820,18 +820,18 @@ namespace layers {
             fn.prevOutputDistance = -n;
             fn.bias               = this->bias();
             fn.patTypes           = helpers::getRawPointer(this->patTypes());
-            fn.niBiasWeights      = _rawNiBiasWeights;
-            fn.igBiasWeights      = _rawIgBiasWeights;
-            fn.fgBiasWeights      = _rawFgBiasWeights;
-            fn.ogBiasWeights      = _rawOgBiasWeights;
-            fn.igPeepWeights      = _rawIgPeepholeWeights;
-            fn.fgPeepWeights      = _rawFgPeepholeWeights;
-            fn.ogPeepWeights      = _rawOgPeepholeWeights;
             fn.cellStates         = helpers::getRawPointer(m_fw.cellStates);
             fn.niActs             = helpers::getRawPointer(m_fw.niActs);
+            fn.niBiasWeights      = _rawNiBiasWeights;
             fn.igActs             = helpers::getRawPointer(m_fw.igActs);
+            fn.igBiasWeights      = _rawIgBiasWeights;
+            fn.igPeepWeights      = _rawIgPeepholeWeights;
             fn.fgActs             = helpers::getRawPointer(m_fw.fgActs);
+            fn.fgBiasWeights      = _rawFgBiasWeights;
+            fn.fgPeepWeights      = _rawFgPeepholeWeights;
             fn.ogActs             = helpers::getRawPointer(m_fw.ogActs);
+            fn.ogBiasWeights      = _rawOgBiasWeights;
+            fn.ogPeepWeights      = _rawOgPeepholeWeights;
 
             for (int timestep = 0; timestep < this->curMaxSeqLength() + m_outputLag; ++timestep) {
                 // collect outputs from previous timestep
@@ -841,7 +841,7 @@ namespace layers {
                         m_fw.timestepMatrices[timestep].igActs.addProduct(m_fw.weightMatrices.igInternal, true, m_fw.timestepMatrices[timestep - 1].tmpOutputs, false);
                         m_fw.timestepMatrices[timestep].fgActs.addProduct(m_fw.weightMatrices.fgInternal, true, m_fw.timestepMatrices[timestep - 1].tmpOutputs, false);
                         m_fw.timestepMatrices[timestep].ogActs.addProduct(m_fw.weightMatrices.ogInternal, true, m_fw.timestepMatrices[timestep - 1].tmpOutputs, false);
-                    } else {
+                    } else { // modification for outputlag
                         m_fw.timestepMatrices[timestep].niActs.assignProduct(m_fw.weightMatrices.niInternal, true, m_fw.timestepMatrices[timestep - 1].tmpOutputs, false);
                         m_fw.timestepMatrices[timestep].igActs.assignProduct(m_fw.weightMatrices.igInternal, true, m_fw.timestepMatrices[timestep - 1].tmpOutputs, false);
                         m_fw.timestepMatrices[timestep].fgActs.assignProduct(m_fw.weightMatrices.fgInternal, true, m_fw.timestepMatrices[timestep - 1].tmpOutputs, false);

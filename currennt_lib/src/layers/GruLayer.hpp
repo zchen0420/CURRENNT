@@ -67,7 +67,8 @@ namespace layers {
         struct timestep_matrices_t {
             helpers::Matrix<TDevice> tmpOutputs;
             helpers::Matrix<TDevice> tmpOutputErrors;
-            helpers::Matrix<TDevice> tmpRgOutputs;
+            helpers::Matrix<TDevice> rgNiInputs;
+            helpers::Matrix<TDevice> rgNiInputErrors;
             helpers::Matrix<TDevice> niActs;
             helpers::Matrix<TDevice> ugActs;
             helpers::Matrix<TDevice> rgActs;
@@ -79,7 +80,8 @@ namespace layers {
         struct forward_backward_info_t {
             real_vector tmpOutputs;
             real_vector tmpOutputErrors;
-            real_vector tmpRgOutputs;
+            real_vector rgNiInputs;
+            real_vector rgNiInputErrors;
             real_vector niActs;
             real_vector ugActs;
             real_vector rgActs;

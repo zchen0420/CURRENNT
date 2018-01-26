@@ -44,7 +44,7 @@ namespace {
     typedef activation_functions::Tanh     cell_input_act_fn_t;
     typedef activation_functions::Tanh     cell_output_act_fn_t;
 
-    struct ComputeGateFn
+    struct ComputeGatesFn
     {
         int    effLayerSize;
         int    prevOutputDistance;
@@ -57,7 +57,6 @@ namespace {
 
         real_t *ugActs;
         real_t *rgActs;
-
         real_t *outputs;
 
         __host__ __device__ real_t operator() (const int &outputIdx, const thrust::tuple<bool, bool> &t) const
@@ -70,11 +69,8 @@ namespace {
             // in that case, we set the all values of that pattern to zero
             if (checkPatType) {
                 int patIdx = outputIdx / effLayerSize;
-                if (patTypes[patIdx] == PATTYPE_NONE) {
-                    if (prevOutputDistance > 0)
-                        outputs[outputIdx] = 0;
+                if (patTypes[patIdx] == PATTYPE_NONE)
                     return 0;
-                }
             }
 
             // calculate indices
@@ -97,10 +93,7 @@ namespace {
             ugActs[outputIdx] = ugAct;
 
             // return reset output
-            if (firstCall)
-                return 0;
-            else
-                return outputs[outputIdx + prevOutputDistance] * rgAct;
+            return firstCall ? 0 : outputs[outputIdx + prevOutputDistance] * rgAct;
         }
     };
 
@@ -111,13 +104,13 @@ namespace {
         real_t bias;
 
         const char   *patTypes;
-        real_t *outputs;
 
         const real_t *niBiasWeights;
         const real_t *ugBiasWeights;
 
         real_t *niActs;
         real_t *ugActs;
+        real_t *outputs;
 
         __host__ __device__ real_t operator() (const int &outputIdx, const thrust::tuple<bool, bool> &t) const
         {
@@ -130,6 +123,7 @@ namespace {
             if (checkPatType) {
                 int patIdx = outputIdx / effLayerSize;
                 if (patTypes[patIdx] == PATTYPE_NONE) {
+                    outputs[outputIdx] = 0;
                     return 0;
                 }
             }
@@ -137,7 +131,7 @@ namespace {
             // calculate indices
             int blockIdx = outputIdx % effLayerSize;
 
-            // load the niag activations
+            // load the ni activations
             real_t niAct = niActs[outputIdx];
 
             // add bias activations
@@ -150,13 +144,10 @@ namespace {
             niActs[outputIdx] = niAct;
 
             // calculate the cell state and store the result
-            real_t ugAct = ugActs[outputIdx];
+            real_t ugAct  = ugActs[outputIdx];
             real_t output = niAct * ugAct;
 
-            if (!firstCall)
-                output += outputs[outputIdx + prevOutputDistance] * (1.0 - ugAct);
-
-            return output;
+            return firstCall ? output : output + outputs[outputIdx + prevOutputDistance] * (1.0 - ugAct);
         }
     };
 
@@ -210,31 +201,29 @@ namespace {
         }
     };
 
-    struct ComputeBlockErrorsFn
+    struct ComputeNiUgErrorsFn
     {
         int effLayerSize;
         int prevOutputDistance;
 
         const char   *patTypes;
         const real_t *outputs;
-        const real_t *rgOutputErrors;
+        const real_t *rgOutputs;
 
         const real_t *niActs;
         const real_t *ugActs;
-        const real_t *rgActs;
 
         real_t *niDeltas;
         real_t *ugDeltas;
-        real_t *rgDeltas;
+        real_t *outputErrors;
 
-        __host__ __device__ void operator() (const thrust::tuple<const real_t&, int, bool, bool, bool> &t) const
+        __host__ __device__ void operator() (const thrust::tuple<int, bool, bool, bool> &t) const
         {
             // unpack the tuple
-            real_t outputErr    = t.get<0>();
-            int    outputIdx    = t.get<1>();
-            bool   firstCall    = t.get<2>();
-            bool   lastCall     = t.get<3>();
-            bool   checkPatType = t.get<4>();
+            int    outputIdx    = t.get<0>();
+            bool   firstCall    = t.get<1>();
+            bool   lastCall     = t.get<2>();
+            bool   checkPatType = t.get<3>();
 
             // check if we can skip the whole calculation because the pattern is a dummy
             // in that case, we set all values of that pattern to zero
@@ -243,44 +232,75 @@ namespace {
                 if (patTypes[patIdx] == PATTYPE_NONE) {
                     niDeltas       [outputIdx] = 0;
                     ugDeltas       [outputIdx] = 0;
+                    return;
+                }
+            }
+
+            // load the activations and the output error
+            real_t niAct      = niActs      [outputIdx];
+            real_t ugAct      = ugActs      [outputIdx];
+            real_t outputErr  = outputErrors[outputIdx];
+
+            if (!lastCall) {
+                outputErr += outputErrors[outputIdx - prevOutputDistance];
+            }
+
+            real_t prevOutput = firstCall ? 0 : outputs[outputIdx + prevOutputDistance];
+
+            // calculate the input and update gate delta
+            // notice in ComputeBlockOutputFn, prevOutput is muled by 1-ugAct
+            real_t ugDelta = gate_act_fn_t::deriv(ugAct) * (niAct - prevOutput) * outputErr;
+            real_t niDelta = cell_input_act_fn_t::deriv(niAct) * ugAct * outputErr;
+
+            // store the niag deltas and the cell state error
+            niDeltas    [outputIdx] = helpers::limitedError(niDelta);
+            ugDeltas    [outputIdx] = helpers::limitedError(ugDelta);
+            outputErrors[outputIdx] = outputErr;
+        }
+    };
+
+    struct ComputeRgErrorsFn
+    {
+        int effLayerSize;
+        int prevOutputDistance;
+
+        const char   *patTypes;
+        const real_t *outputs;
+        const real_t *rgActs;
+        const real_t *rgNiInputErrors;
+
+        real_t *rgDeltas;
+        real_t *outputErrors;
+
+        __host__ __device__ void operator() (const thrust::tuple<int, bool, bool, bool> &t) const
+        {
+            // unpack the tuple
+            int    outputIdx    = t.get<0>();
+            bool   firstCall    = t.get<1>();
+            bool   lastCall     = t.get<2>();
+            bool   checkPatType = t.get<3>();
+
+            // check if we can skip the whole calculation because the pattern is a dummy
+            // in that case, we set all values of that pattern to zero
+            if (checkPatType) {
+                int patIdx = outputIdx / effLayerSize;
+                if (patTypes[patIdx] == PATTYPE_NONE) {
                     rgDeltas       [outputIdx] = 0;
                     return;
                 }
             }
 
-            // load the niag activations, the cell state and the output error
-            real_t niAct     = niActs      [outputIdx];
-            real_t ugAct     = ugActs      [outputIdx];
-            real_t rgAct     = rgActs      [outputIdx];
-            real_t cumuErr   = outputErr;
+           // load the activations, the cell state and the output error
+            real_t rgAct        = rgActs         [outputIdx];
+            real_t rgNiInputErr = rgNiInputErrors[outputIdx];
+            real_t prevOutput   = firstCall ? 0 : outputs [outputIdx + prevOutputDistance];
 
-            if (!firstCall) {
-                real_t nextUgDelta      = ugDeltas       [outputIdx - prevOutputDistance];
-                real_t nextRgDelta      = rgDeltas       [outputIdx - prevOutputDistance];
-
-                cumuErr += nextUgDelta + nextRgDelta;
-            }
-
-            // calculate the net input delta
-            real_t niDelta = cell_input_act_fn_t::deriv(niAct) * ugAct * cumuErr;
-
-            // calculate the net update and reset delta
-            real_t ugDelta = niAct;
-            real_t rgDelta = 0;
-
-            if (!lastCall) {
-                real_t rgOutputErr = rgOutputErrors[outputIdx];
-                real_t prevOutput  = outputs       [outputIdx + prevOutputDistance];
-
-                ugDelta -= prevOutput;
-                rgDelta  = gate_act_fn_t::deriv(rgAct) * prevOutput * rgOutputErr;
-            }
-            ugDelta *= gate_act_fn_t::deriv(ugAct) * cumuErr;
+            // calculate the reset delta
+            real_t rgDelta = gate_act_fn_t::deriv(rgAct) * prevOutput * rgNiInputErr;
 
             // store the niag deltas and the cell state error
-            niDeltas       [outputIdx] = helpers::limitedError(niDelta);
-            ugDeltas       [outputIdx] = helpers::limitedError(ugDelta);
-            rgDeltas       [outputIdx] = helpers::limitedError(rgDelta);
+            rgDeltas    [outputIdx] = helpers::limitedError(rgDelta);
+            outputErrors[outputIdx] += rgAct * rgNiInputErr;
         }
     };
 
@@ -460,12 +480,12 @@ namespace {
 namespace layers {
 
     template <typename TDevice>
-    GruLayer<TDevice>::GruLayer(const helpers::JsonValue &layerChild, 
-                                  const helpers::JsonValue &weightsSection,
-                                  Layer<TDevice> &precedingLayer,
-                                  bool bidirectional)
-        : TrainableLayer<TDevice>(layerChild, weightsSection, 3, (bidirectional ? (3 * helpers::safeJsonGetInt(layerChild, "size")) >> 1 : (3 * helpers::safeJsonGetInt(layerChild, "size"))), precedingLayer)
-        , m_isBidirectional      (bidirectional)
+    GruLayer<TDevice>::GruLayer(const helpers::JsonValue &layerChild,
+                                const helpers::JsonValue &weightsSection,
+                                Layer<TDevice> &precedingLayer,
+                                bool bidirectional) : TrainableLayer<TDevice>( layerChild, weightsSection, 3,
+                                    (bidirectional ? (3 * helpers::safeJsonGetInt(layerChild, "size")) >> 1 : (3 * helpers::safeJsonGetInt(layerChild, "size"))),
+                                    precedingLayer), m_isBidirectional(bidirectional)
     {
         if (m_isBidirectional && this->size() % 2 != 0)
             throw std::runtime_error("Cannot create a bidirectional layer with an odd layer size");
@@ -496,19 +516,19 @@ namespace layers {
             if (m_isBidirectional) {
                 fwbw->tmpOutputs      = tmp;
                 fwbw->tmpOutputErrors = tmp;
-            }
-            else {
+            } else {
                 fwbw->tmpOutputs     .swap(this->_outputs());
                 fwbw->tmpOutputErrors.swap(this->outputErrors());
             }
 
-            fwbw->niActs       = tmp;
-            fwbw->ugActs       = tmp;
-            fwbw->rgActs       = tmp;
-            fwbw->niDeltas     = tmp;
-            fwbw->ugDeltas     = tmp;
-            fwbw->rgDeltas     = tmp;
-            fwbw->tmpRgOutputs = tmp;
+            fwbw->niActs          = tmp;
+            fwbw->ugActs          = tmp;
+            fwbw->rgActs          = tmp;
+            fwbw->niDeltas        = tmp;
+            fwbw->ugDeltas        = tmp;
+            fwbw->rgDeltas        = tmp;
+            fwbw->rgNiInputs      = tmp;
+            fwbw->rgNiInputErrors = tmp;
 
             // weight matrices
             weight_matrices_t* wmArr [] = { &fwbw->weightMatrices, &fwbw->weightUpdateMatrices };
@@ -538,7 +558,8 @@ namespace layers {
                 timestep_matrices_t tm;
                 tm.tmpOutputs      = helpers::Matrix<TDevice>(&fwbw->tmpOutputs,      rows, cols, offset);
                 tm.tmpOutputErrors = helpers::Matrix<TDevice>(&fwbw->tmpOutputErrors, rows, cols, offset);
-                tm.tmpRgOutputs    = helpers::Matrix<TDevice>(&fwbw->tmpRgOutputs,    rows, cols, offset);
+                tm.rgNiInputs      = helpers::Matrix<TDevice>(&fwbw->rgNiInputs,      rows, cols, offset);
+                tm.rgNiInputErrors = helpers::Matrix<TDevice>(&fwbw->rgNiInputErrors, rows, cols, offset);
                 tm.niActs          = helpers::Matrix<TDevice>(&fwbw->niActs,          rows, cols, offset);
                 tm.ugActs          = helpers::Matrix<TDevice>(&fwbw->ugActs,          rows, cols, offset);
                 tm.rgActs          = helpers::Matrix<TDevice>(&fwbw->rgActs,          rows, cols, offset);
@@ -683,19 +704,19 @@ namespace layers {
             int n   = this->parallelSequences() * els;
 
             // forward states
-            internal::ComputeGateFn       gfn;
+            internal::ComputeGatesFn       gfn;
             internal::ComputeBlockOutputFn fn;
             gfn.effLayerSize       = fn.effLayerSize       = els;
             gfn.prevOutputDistance = fn.prevOutputDistance = -n;
-            gfn.bias               = fn.bias               = this->bias();
             gfn.patTypes           = fn.patTypes           = helpers::getRawPointer(this->patTypes());
+            gfn.bias               = fn.bias               = this->bias();
             gfn.outputs            = fn.outputs            = helpers::getRawPointer(m_fw.tmpOutputs);
             gfn.ugActs             = fn.ugActs             = helpers::getRawPointer(m_fw.ugActs);
             gfn.ugBiasWeights      = fn.ugBiasWeights      = _rawUgBiasWeights;
-            gfn.rgActs             = helpers::getRawPointer(m_fw.rgActs);;
-            gfn.rgBiasWeights      = _rawRgBiasWeights;
-            fn.niActs              = helpers::getRawPointer(m_fw.niActs);
-            fn.niBiasWeights       = _rawNiBiasWeights;
+            gfn.rgActs                                     = helpers::getRawPointer(m_fw.rgActs);;
+            gfn.rgBiasWeights                              = _rawRgBiasWeights;
+                                     fn.niBiasWeights      = _rawNiBiasWeights;
+                                     fn.niActs             = helpers::getRawPointer(m_fw.niActs);
 
             for (int timestep = 0; timestep < this->curMaxSeqLength(); ++timestep) {
                 // collect outputs from previous timestep
@@ -712,13 +733,14 @@ namespace layers {
                         thrust::make_tuple(
                             thrust::constant_iterator<bool>(!timestep),
                             thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
-                    m_fw.tmpRgOutputs.begin() + n*timestep,
+                    m_fw.rgNiInputs.begin() + n*timestep,
                     gfn
                     );
 
                 // collect outputs from previous timestep
                 if (timestep != 0) {
-                    m_fw.timestepMatrices[timestep].niActs.addProduct(m_fw.weightMatrices.niInternal, true, m_fw.timestepMatrices[timestep-1].tmpRgOutputs, false);
+                    // rgOutput belongs to the present unit rather than the previous one
+                    m_fw.timestepMatrices[timestep].niActs.addProduct(m_fw.weightMatrices.niInternal, true, m_fw.timestepMatrices[timestep].rgNiInputs, false);
                 }
 
                 // compute outputs
@@ -743,8 +765,8 @@ namespace layers {
                 fn.ugBiasWeights      += els;
                 gfn.outputs            = fn.outputs = helpers::getRawPointer(m_bw.tmpOutputs);
                 gfn.ugActs             = fn.ugActs  = helpers::getRawPointer(m_bw.ugActs);
-                fn.niActs              = helpers::getRawPointer(m_bw.niActs);
-                gfn.rgActs             = helpers::getRawPointer(m_bw.ugActs);
+                                         fn.niActs  = helpers::getRawPointer(m_bw.niActs);
+                gfn.rgActs                          = helpers::getRawPointer(m_bw.rgActs);
 
                 for (int timestep = this->curMaxSeqLength()-1; timestep >= 0; --timestep) {
                     // collect outputs from previous timestep
@@ -757,21 +779,26 @@ namespace layers {
                     thrust::transform(
                         thrust::counting_iterator<int>(n*timestep),
                         thrust::counting_iterator<int>(n*timestep) + n,
-                        thrust::make_zip_iterator(thrust::make_tuple(thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1), thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
-                        m_bw.tmpRgOutputs.begin() + n*timestep,
+                        thrust::make_zip_iterator(
+                            thrust::make_tuple(
+                                thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),
+                                thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
+                        m_bw.rgNiInputs.begin() + n*timestep,
                         gfn
                         );
 
                     // collect outputs from previous timestep
-                    if (timestep != this->curMaxSeqLength()-1) {
-                        m_bw.timestepMatrices[timestep].niActs.addProduct(m_bw.weightMatrices.niInternal, true, m_bw.timestepMatrices[timestep+1].tmpRgOutputs, false);
-                    }
+                    if (timestep != this->curMaxSeqLength()-1)
+                        m_bw.timestepMatrices[timestep].niActs.addProduct(m_bw.weightMatrices.niInternal, true, m_bw.timestepMatrices[timestep].rgNiInputs, false);
 
                     // compute outputs
                     thrust::transform(
                         thrust::counting_iterator<int>(n*timestep),
                         thrust::counting_iterator<int>(n*timestep) + n,
-                        thrust::make_zip_iterator(thrust::make_tuple(thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1), thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
+                        thrust::make_zip_iterator(
+                            thrust::make_tuple(
+                                thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),
+                                thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
                         m_bw.tmpOutputs.begin() + n*timestep,
                         fn
                         );
@@ -829,62 +856,123 @@ namespace layers {
             int n   = this->parallelSequences() * els;
 
             // forward states
-            internal::ComputeBlockErrorsFn fn;
-            fn.effLayerSize       = els;
-            fn.prevOutputDistance = -n;
-            fn.patTypes           = helpers::getRawPointer(this->patTypes());
-            fn.niActs             = helpers::getRawPointer(m_fw.niActs);
-            fn.ugActs             = helpers::getRawPointer(m_fw.ugActs);
-            fn.rgActs             = helpers::getRawPointer(m_fw.rgActs);
-            fn.niDeltas           = helpers::getRawPointer(m_fw.niDeltas);
-            fn.ugDeltas           = helpers::getRawPointer(m_fw.ugDeltas);
-            fn.rgDeltas           = helpers::getRawPointer(m_fw.rgDeltas);
-            fn.outputs            = helpers::getRawPointer(m_fw.tmpOutputs);
-            fn.rgOutputErrors     = helpers::getRawPointer(m_fw.tmpRgOutputs);
+            internal::ComputeNiUgErrorsFn niUgFn;
+            internal::ComputeRgErrorsFn   rgFn;
+            niUgFn.effLayerSize       = rgFn.effLayerSize       = els;
+            niUgFn.prevOutputDistance = rgFn.prevOutputDistance = -n;
+            niUgFn.patTypes           = rgFn.patTypes           = helpers::getRawPointer(this->patTypes());
+            niUgFn.niActs                                       = helpers::getRawPointer(m_fw.niActs);
+            niUgFn.niDeltas                                     = helpers::getRawPointer(m_fw.niDeltas);
+            niUgFn.ugActs                                       = helpers::getRawPointer(m_fw.ugActs);
+            niUgFn.ugDeltas                                     = helpers::getRawPointer(m_fw.ugDeltas);
+            niUgFn.outputs                                      = helpers::getRawPointer(m_fw.tmpOutputs);
+            niUgFn.outputErrors       = rgFn.outputErrors       = helpers::getRawPointer(m_fw.tmpOutputErrors);
+                                        rgFn.rgActs             = helpers::getRawPointer(m_fw.rgActs);
+                                        rgFn.rgDeltas           = helpers::getRawPointer(m_fw.rgDeltas);
+                                        rgFn.rgNiInputErrors    = helpers::getRawPointer(m_fw.rgNiInputErrors);
 
             for (int timestep = this->curMaxSeqLength()-1; timestep >= 0; --timestep) {
                 // collect errors from previous timestep
                 if (timestep != this->curMaxSeqLength()-1) {
-                    m_fw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_fw.weightMatrices.niInternal, false, m_fw.timestepMatrices[timestep+1].niDeltas, false);
                     m_fw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_fw.weightMatrices.ugInternal, false, m_fw.timestepMatrices[timestep+1].ugDeltas, false);
-                    m_fw.timestepMatrices[timestep].tmpRgOutputs.assignProduct(m_fw.weightMatrices.niInternal, false, m_fw.timestepMatrices[timestep+1].niDeltas, false);
-                    m_fw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_fw.weightMatrices.rgInternal, false, m_fw.timestepMatrices[timestep+1].tmpRgOutputs, false);
+                    m_fw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_fw.weightMatrices.rgInternal, false, m_fw.timestepMatrices[timestep+1].rgDeltas, false);
+                    // the path in the middle need further modification, maybe.
                 }
 
-                // compute errors
+                // compute update gate and network input errors
                 thrust::for_each(
-                    thrust::make_zip_iterator(thrust::make_tuple(m_fw.tmpOutputErrors.begin() + n*timestep,   thrust::counting_iterator<int>(n*timestep),   thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),   thrust::constant_iterator<bool>(!timestep),   thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
-                    thrust::make_zip_iterator(thrust::make_tuple(m_fw.tmpOutputErrors.begin() + n*timestep+n, thrust::counting_iterator<int>(n*timestep)+n, thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1)+n, thrust::constant_iterator<bool>(!timestep)+n, thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength())+n)),
-                    fn
+                    thrust::make_zip_iterator(
+                        thrust::make_tuple(
+                            thrust::counting_iterator<int>(n*timestep),
+                            thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),
+                            thrust::constant_iterator<bool>(!timestep),
+                            thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
+                    thrust::make_zip_iterator(
+                        thrust::make_tuple(
+                            thrust::counting_iterator<int>(n*timestep) + n,
+                            thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1) + n,
+                            thrust::constant_iterator<bool>(!timestep) + n,
+                            thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()) + n)),
+                    niUgFn
+                    );
+
+                // pass the network input toward reset gate
+                m_fw.timestepMatrices[timestep].rgNiInputErrors.assignProduct(m_fw.weightMatrices.niInternal, false, m_fw.timestepMatrices[timestep].niDeltas, false);
+
+                // for reset gate update and pass the rgNiInputErrors to tmpOutputErrors
+                thrust::for_each(
+                    thrust::make_zip_iterator(
+                        thrust::make_tuple(
+                            thrust::counting_iterator<int>(n*timestep),
+                            thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),
+                            thrust::constant_iterator<bool>(!timestep),
+                            thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
+                    thrust::make_zip_iterator(
+                        thrust::make_tuple(
+                            thrust::counting_iterator<int>(n*timestep) + n,
+                            thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1) + n,
+                            thrust::constant_iterator<bool>(!timestep) + n,
+                            thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()) + n)),
+                    rgFn
                     );
             }
 
             // backward states
             if (m_isBidirectional) {
-                fn.prevOutputDistance = +n;
-                fn.niActs             = helpers::getRawPointer(m_bw.niActs);
-                fn.ugActs             = helpers::getRawPointer(m_bw.ugActs);
-                fn.rgActs             = helpers::getRawPointer(m_bw.rgActs);
-                fn.niDeltas           = helpers::getRawPointer(m_bw.niDeltas);
-                fn.ugDeltas           = helpers::getRawPointer(m_bw.ugDeltas);
-                fn.rgDeltas           = helpers::getRawPointer(m_bw.rgDeltas);
-                fn.outputs            = helpers::getRawPointer(m_bw.tmpOutputs);
-                fn.rgOutputErrors     = helpers::getRawPointer(m_bw.tmpRgOutputs);
+                niUgFn.prevOutputDistance = rgFn.prevOutputDistance = +n;
+                niUgFn.niActs                                       = helpers::getRawPointer(m_bw.niActs);
+                niUgFn.niDeltas                                     = helpers::getRawPointer(m_bw.niDeltas);
+                niUgFn.ugActs                                       = helpers::getRawPointer(m_bw.ugActs);
+                niUgFn.ugDeltas                                     = helpers::getRawPointer(m_bw.ugDeltas);
+                niUgFn.outputs                                      = helpers::getRawPointer(m_bw.tmpOutputs);
+                niUgFn.outputErrors       = rgFn.outputErrors       = helpers::getRawPointer(m_bw.tmpOutputErrors);
+                                            rgFn.rgActs             = helpers::getRawPointer(m_bw.rgActs);
+                                            rgFn.rgDeltas           = helpers::getRawPointer(m_bw.rgDeltas);
+                                            rgFn.rgNiInputErrors    = helpers::getRawPointer(m_bw.rgNiInputErrors);
 
                 for (int timestep = 0; timestep < this->curMaxSeqLength(); ++timestep) {
                     // collect errors from previous timestep
                     if (timestep != 0) {
-                        m_bw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_bw.weightMatrices.niInternal, false, m_bw.timestepMatrices[timestep-1].niDeltas, false);
                         m_bw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_bw.weightMatrices.ugInternal, false, m_bw.timestepMatrices[timestep-1].ugDeltas, false);
-                        m_bw.timestepMatrices[timestep].tmpRgOutputs.assignProduct(m_bw.weightMatrices.niInternal, false, m_bw.timestepMatrices[timestep-1].niDeltas, false);
-                        m_bw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_bw.weightMatrices.rgInternal, false, m_bw.timestepMatrices[timestep-1].tmpRgOutputs, false);
+                        m_bw.timestepMatrices[timestep].tmpOutputErrors.addProduct(m_bw.weightMatrices.rgInternal, false, m_bw.timestepMatrices[timestep-1].rgDeltas, false);
+                        // the same with forward
                     }
 
                     // compute errors
                     thrust::for_each(
-                        thrust::make_zip_iterator(thrust::make_tuple(m_bw.tmpOutputErrors.begin() + n*timestep,   thrust::counting_iterator<int>(n*timestep),   thrust::constant_iterator<bool>(!timestep),   thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),   thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
-                        thrust::make_zip_iterator(thrust::make_tuple(m_bw.tmpOutputErrors.begin() + n*timestep+n, thrust::counting_iterator<int>(n*timestep)+n, thrust::constant_iterator<bool>(!timestep)+n, thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1)+n, thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength())+n)),
-                        fn
+                        thrust::make_zip_iterator(
+                            thrust::make_tuple(
+                                thrust::counting_iterator<int>(n*timestep),
+                                thrust::constant_iterator<bool>(!timestep),
+                                thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),
+                                thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
+                        thrust::make_zip_iterator(
+                            thrust::make_tuple(
+                                thrust::counting_iterator<int>(n*timestep)+n,
+                                thrust::constant_iterator<bool>(!timestep)+n,
+                                thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1)+n,
+                                thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength())+n)),
+                        niUgFn
+                        );
+
+                    // pass the network input toward reset gate
+                    m_bw.timestepMatrices[timestep].rgNiInputErrors.assignProduct(m_bw.weightMatrices.niInternal, false, m_bw.timestepMatrices[timestep].niDeltas, false);
+
+                    // for reset gate update
+                    thrust::for_each(
+                        thrust::make_zip_iterator(
+                            thrust::make_tuple(
+                                thrust::counting_iterator<int>(n*timestep),
+                                thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1),
+                                thrust::constant_iterator<bool>(!timestep),
+                                thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()))),
+                        thrust::make_zip_iterator(
+                            thrust::make_tuple(
+                                thrust::counting_iterator<int>(n*timestep) + n,
+                                thrust::constant_iterator<bool>(timestep == this->curMaxSeqLength()-1) + n,
+                                thrust::constant_iterator<bool>(!timestep) + n,
+                                thrust::constant_iterator<bool>(timestep >= this->curMinSeqLength()) + n)),
+                        rgFn
                         );
                 }
             }

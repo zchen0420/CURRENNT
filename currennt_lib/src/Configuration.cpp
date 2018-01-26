@@ -125,7 +125,7 @@ Configuration::Configuration(int argc, const char *argv[])
         ("cuda",               po::value(&m_useCuda)          ->default_value(true),          "use CUDA to accelerate the computations")
         ("list_devices",       po::value(&m_listDevices)      ->default_value(false),         "display list of CUDA devices and exit")
         ("parallel_sequences", po::value(&m_parallelSequences)->default_value(1),             "sets the number of parallel calculated sequences")
-        ("devices_id",         po::value(&m_devicesID)        ->default_value(0),             "sets the ID of GPU devices to use")
+        ("device_id",          po::value(&m_deviceID)         ->default_value(0),             "sets the ID of GPU device to use")
         ("random_seed",        po::value(&m_randomSeed)       ->default_value(0u),            "sets the seed for the random number generator (0 = auto)")
         ;
 
@@ -142,7 +142,7 @@ Configuration::Configuration(int argc, const char *argv[])
     po::options_description trainingOptions("Training options");
     trainingOptions.add_options()
         ("train",               po::value(&m_trainingMode)     ->default_value(false),                 "enables the training mode")
-        ("stochastic", po::value(&m_hybridOnlineBatch)->default_value(false),                 "enables weight updates after every mini-batch of parallel calculated sequences")
+        ("stochastic",          po::value(&m_hybridOnlineBatch)->default_value(false),                 "enables weight updates after every mini-batch of parallel calculated sequences")
         ("hybrid_online_batch", po::value(&m_hybridOnlineBatch)->default_value(false),                 "same as --stochastic (for compatibility)")
         ("shuffle_fractions",   po::value(&m_shuffleFractions) ->default_value(false),                 "shuffles mini-batches in stochastic gradient descent")
         ("shuffle_sequences",   po::value(&m_shuffleSequences) ->default_value(false),                 "shuffles sequences within and across mini-batches")
@@ -157,7 +157,7 @@ Configuration::Configuration(int argc, const char *argv[])
         ("beta2",               po::value(&m_beta2)            ->default_value((real_t)0.999, "0.999"),"sets the beta2 for the the adaptive moment optimizer")
         ("epsilon",             po::value(&m_epsilon)          ->default_value((real_t)1e-8, "1e-8"),  "sets the epsilon for the adaptive dalta or gradient optimizer")
         ("momentum",            po::value(&m_momentum)         ->default_value((real_t)0.9,  "0.9"),   "sets the momentum for the steepest descent optimizer")
-        ("weight_noise_sigma",  po::value(&m_weightNoiseSigma) ->default_value((real_t)0), "sets the standard deviation of the weight noise added for the gradient calculation on every batch")
+        ("weight_noise_sigma",  po::value(&m_weightNoiseSigma) ->default_value((real_t)0),             "sets the standard deviation of the weight noise added for the gradient calculation on every batch")
         ("save_network",        po::value(&m_trainedNetwork)   ->default_value("trained_network.jsn"), "sets the file name of the trained network that will be produced")
         ;
 
@@ -447,9 +447,9 @@ int Configuration::parallelSequences() const
     return (int)m_parallelSequences;
 }
 
-int Configuration::devicesID() const
+int Configuration::deviceID() const
 {
-    return (int)m_devicesID;
+    return (int)m_deviceID;
 }
 
 int Configuration::maxEpochs() const
